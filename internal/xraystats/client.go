@@ -65,9 +65,41 @@ func NewClient(addr string, opts ...Option) *Client {
 
 // CountActiveUsers samples Xray stats twice and counts clientEmail entries with meaningful traffic.
 func (c *Client) CountActiveUsers(ctx context.Context) (int, error) {
-	conn, err := grpc.DialContext(ctx, c.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	users, activity, err := c.measureUsers(ctx)
 	if err != nil {
 		return 0, err
+	}
+
+	var active int
+	for email := range users {
+		if activity[email].Active(c.thresholdBytes) {
+			active++
+		}
+	}
+
+	return active, nil
+}
+
+// Snapshot collects current user traffic counters.
+func (c *Client) Snapshot(ctx context.Context) (map[string]UserTraffic, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	return c.snapshot(ctx, command.NewStatsServiceClient(conn))
+}
+
+// MeasureUsers returns the latest snapshot plus per-user activity deltas.
+func (c *Client) MeasureUsers(ctx context.Context) (map[string]UserTraffic, map[string]UserActivity, error) {
+	return c.measureUsers(ctx)
+}
+
+func (c *Client) measureUsers(ctx context.Context) (map[string]UserTraffic, map[string]UserActivity, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 	defer conn.Close()
 
@@ -75,65 +107,125 @@ func (c *Client) CountActiveUsers(ctx context.Context) (int, error) {
 
 	first, err := c.snapshot(ctx, client)
 	if err != nil {
-		return 0, err
+		return nil, nil, err
 	}
 
 	if err := wait(ctx, c.sampleInterval); err != nil {
-		return 0, err
+		return nil, nil, err
 	}
 
 	second, err := c.snapshot(ctx, client)
 	if err != nil {
-		return 0, err
+		return nil, nil, err
 	}
 
-	return countActive(first, second, c.thresholdBytes), nil
+	return second, diffActivity(first, second), nil
 }
 
-func (c *Client) snapshot(ctx context.Context, client command.StatsServiceClient) (map[string]int64, error) {
+type UserTraffic struct {
+	Downlink int64
+	Uplink   int64
+}
+
+type UserActivity struct {
+	DownDelta uint64
+	UpDelta   uint64
+}
+
+func (a UserActivity) Total() uint64 {
+	return a.DownDelta + a.UpDelta
+}
+
+func (a UserActivity) Active(threshold uint64) bool {
+	if threshold == 0 {
+		threshold = DefaultThresholdBytes
+	}
+	return a.Total() >= threshold
+}
+
+func (c *Client) snapshot(ctx context.Context, client command.StatsServiceClient) (map[string]UserTraffic, error) {
 	resp, err := client.QueryStats(ctx, &command.QueryStatsRequest{
-		Pattern: "user>>>*>>>traffic>>>downlink",
+		Pattern: "user>>>",
 		Reset_:  false,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	stats := make(map[string]int64)
+	stats := make(map[string]UserTraffic)
 	for _, stat := range resp.GetStat() {
 		if stat == nil {
 			continue
 		}
 
-		user := extractUser(stat.GetName())
-		if user == "" {
+		email, direction := parseUserStat(stat.GetName())
+		if email == "" {
 			continue
 		}
 
-		stats[user] = stat.GetValue()
+		entry := stats[email]
+		switch direction {
+		case "downlink":
+			entry.Downlink = stat.GetValue()
+		case "uplink":
+			entry.Uplink = stat.GetValue()
+		default:
+			continue
+		}
+		stats[email] = entry
 	}
 
 	return stats, nil
 }
 
-func countActive(prev, curr map[string]int64, threshold uint64) int {
-	if threshold == 0 {
-		threshold = DefaultThresholdBytes
-	}
+func diffActivity(prev, curr map[string]UserTraffic) map[string]UserActivity {
+	result := make(map[string]UserActivity, len(curr))
+	for email, currVals := range curr {
+		prevVals := prev[email]
 
-	var active int
-	for user, currVal := range curr {
-		prevVal := prev[user]
-		if currVal <= prevVal {
-			continue
+		var delta UserActivity
+		if currVals.Downlink > prevVals.Downlink {
+			delta.DownDelta = uint64(currVals.Downlink - prevVals.Downlink)
 		}
-		if uint64(currVal-prevVal) < threshold {
-			continue
+		if currVals.Uplink > prevVals.Uplink {
+			delta.UpDelta = uint64(currVals.Uplink - prevVals.Uplink)
 		}
-		active++
-	}
 
-	return active
+		result[email] = delta
+	}
+	return result
+}
+
+func parseUserStat(name string) (email, direction string) {
+	parts := strings.Split(name, ">>>")
+	if len(parts) < 4 {
+		return "", ""
+	}
+	if parts[0] != "user" || parts[2] != "traffic" {
+		return "", ""
+	}
+	return parts[1], parts[3]
+}
+
+func (c *Client) dial(ctx context.Context) (*grpc.ClientConn, error) {
+	addr := c.addr
+	if addr == "" {
+		addr = DefaultAddress
+	}
+	return grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
+
+// SampleInterval exposes the currently configured sampling delay.
+func (c *Client) SampleInterval() time.Duration {
+	return c.sampleInterval
+}
+
+// ThresholdBytes returns the bytes delta required to treat a user as active.
+func (c *Client) ThresholdBytes() uint64 {
+	if c.thresholdBytes == 0 {
+		return DefaultThresholdBytes
+	}
+	return c.thresholdBytes
 }
 
 func wait(ctx context.Context, d time.Duration) error {

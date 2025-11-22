@@ -47,6 +47,7 @@ go run ./cmd/agent
 | `REPORT_INTERVAL` | Интервал отчёта (секунды, 3–30)              | `5`                   |
 | `AGENT_TOKEN`     | (опционально) Bearer-токен                   | пусто                 |
 | `XRAY_API_ADDR`   | (опционально) gRPC API Xray Stats            | `127.0.0.1:10085`     |
+| `XRAY_ACTIVE_THRESHOLD` | Байты дельты для статуса «online» (CLI) | `1024`                |
 
 ### Docker
 
@@ -80,19 +81,36 @@ docker compose up -d
 docker exec -it node_agent node-agent online
 ```
 
-### CLI: онлайн-пользователи Xray
-
-У Xray должен быть включён API (`stats` + inbound `api`). После этого можно получить количество активных `clientEmail` (передают трафик в последние пару секунд):
+Если нужен разовый запуск без `docker exec`, можно стартовать одноразовый контейнер:
 
 ```bash
-# XRAY_API_ADDR можно не задавать, если Xray слушает 127.0.0.1:10085
-XRAY_API_ADDR=127.0.0.1:10085 node-agent online
+docker run --rm --net host \
+  -e XRAY_API_ADDR=127.0.0.1:10085 \
+  ivanstepachev/node_agent \
+  node-agent users
 ```
 
-Вывод:
+### CLI: онлайн-пользователи Xray
 
+У Xray должен быть включён API (`stats` + inbound `api`). После этого доступны две команды:
+
+```bash
+# порог активности можно настроить через XRAY_ACTIVE_THRESHOLD (в байтах)
+XRAY_API_ADDR=127.0.0.1:10085 node-agent online    # только количество online
+XRAY_API_ADDR=127.0.0.1:10085 node-agent users     # список всех email + статус + суммарный трафик
 ```
-Active users: 7
+
+Пример вывода `users`:
+
+```bash
+Total configs: 34
+Active now:   7 (threshold 1.0 KB / interval 2s)
+
+Email                           Down         Up           Status
+3315575@quantech.live           249.6 MB     12.7 MB      active
+3331516@quantech.live           32.7 KB      4.5 KB       burst
+3330421@quantech.live           1.6 KB       0 B          idle
+# ...
 ```
 
 Команда делает два замера трафика (дельта > 1 КБ) и считает пользователей, у которых есть движение — как в Remnawave. По умолчанию используется адрес `127.0.0.1:10085`, но его можно переопределить переменной `XRAY_API_ADDR`.

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -77,10 +79,12 @@ func runCLI(args []string) error {
 
 	switch args[0] {
 	case "online":
-		addr := strings.TrimSpace(os.Getenv("XRAY_API_ADDR"))
-		client := xraystats.NewClient(addr)
+		client, err := buildXrayClient()
+		if err != nil {
+			return err
+		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), xraystats.DefaultSampleInterval*2+3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), client.SampleInterval()*2+3*time.Second)
 		defer cancel()
 
 		count, err := client.CountActiveUsers(ctx)
@@ -89,6 +93,22 @@ func runCLI(args []string) error {
 		}
 
 		fmt.Printf("Active users: %d\n", count)
+		return nil
+	case "users":
+		client, err := buildXrayClient()
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), client.SampleInterval()*2+5*time.Second)
+		defer cancel()
+
+		snapshot, activity, err := client.MeasureUsers(ctx)
+		if err != nil {
+			return fmt.Errorf("fetch user stats: %w", err)
+		}
+
+		printUserSummary(snapshot, activity, client.ThresholdBytes())
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
@@ -103,5 +123,85 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  node-agent            # run metrics agent (default)")
 	fmt.Println("  node-agent online     # show number of active Xray users via XRAY_API_ADDR")
+	fmt.Println("  node-agent users      # list all clientEmail entries with traffic & active flag")
 	fmt.Println("  node-agent help       # show this message")
+}
+
+func buildXrayClient() (*xraystats.Client, error) {
+	addr := strings.TrimSpace(os.Getenv("XRAY_API_ADDR"))
+
+	var opts []xraystats.Option
+	if raw := strings.TrimSpace(os.Getenv("XRAY_ACTIVE_THRESHOLD")); raw != "" {
+		val, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse XRAY_ACTIVE_THRESHOLD: %w", err)
+		}
+		opts = append(opts, xraystats.WithThresholdBytes(val))
+	}
+
+	return xraystats.NewClient(addr, opts...), nil
+}
+
+func printUserSummary(snapshot map[string]xraystats.UserTraffic, activity map[string]xraystats.UserActivity, threshold uint64) {
+	emails := make([]string, 0, len(snapshot))
+	for email := range snapshot {
+		emails = append(emails, email)
+	}
+	sort.Strings(emails)
+
+	activeCount := 0
+	for _, email := range emails {
+		if activity[email].Active(threshold) {
+			activeCount++
+		}
+	}
+
+	fmt.Printf("Total configs: %d\n", len(emails))
+	fmt.Printf("Active now:   %d (threshold %s / interval %.0fs)\n\n",
+		activeCount, formatBytes(int64(threshold)), xraystats.DefaultSampleInterval.Seconds())
+
+	if len(emails) == 0 {
+		fmt.Println("No clientEmail entries reported by Xray.")
+		return
+	}
+
+	fmt.Printf("%-32s %-12s %-12s %-8s\n", "Email", "Down", "Up", "Status")
+	for _, email := range emails {
+		traffic := snapshot[email]
+		state := activityStatus(activity[email], threshold)
+		fmt.Printf("%-32s %-12s %-12s %-8s\n",
+			email,
+			formatBytes(traffic.Downlink),
+			formatBytes(traffic.Uplink),
+			state)
+	}
+}
+
+func activityStatus(a xraystats.UserActivity, threshold uint64) string {
+	switch {
+	case a.Active(threshold):
+		return "active"
+	case a.Total() > 0:
+		return "burst"
+	default:
+		return "idle"
+	}
+}
+
+func formatBytes(v int64) string {
+	if v < 0 {
+		v = 0
+	}
+	const step = 1024.0
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	val := float64(v)
+	idx := 0
+	for idx < len(units)-1 && val >= step {
+		val /= step
+		idx++
+	}
+	if idx == 0 {
+		return fmt.Sprintf("%d %s", int64(val), units[idx])
+	}
+	return fmt.Sprintf("%.1f %s", val, units[idx])
 }
