@@ -60,6 +60,17 @@ docker run --name vpn-agent --restart unless-stopped \
   vpn-agent
 ```
 
+#### Docker Compose
+
+Есть готовый `docker-compose.yml`:
+
+```bash
+BACKEND_URL=https://backend.example \
+SERVER_ID=srv-01 \
+REPORT_INTERVAL=5 \
+docker compose up -d
+```
+
 > Агент читает `/proc/*`, поэтому контейнеру нужен доступ к host PID/network namespace (например, `--net host`).
 
 ## Логи

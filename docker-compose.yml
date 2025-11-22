@@ -1,0 +1,11 @@
+services:
+  vpn-agent:
+    build: .
+    container_name: vpn-agent
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      BACKEND_URL: ${BACKEND_URL:?set BACKEND_URL}
+      SERVER_ID: ${SERVER_ID:?set SERVER_ID}
+      REPORT_INTERVAL: ${REPORT_INTERVAL:-5}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
