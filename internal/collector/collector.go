@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,12 +25,12 @@ type Metrics struct {
 
 // Collector consolidates data from /proc files and interface detection.
 type Collector struct {
-	detector      netinfo.Detector
-	mu            sync.Mutex
-	prevCPU       cpuTimes
-	prevSoftIRQ   uint64
-	prevNet       map[string]netCounters
-	lastTimestamp time.Time
+	detector    netinfo.Detector
+	mu          sync.Mutex
+	prevCPU     cpuTimes
+	prevSoftIRQ uint64
+	prevNet     map[string]netCounters
+	lastSample  time.Time
 }
 
 // New returns a Collector that uses the provided interface detector.
@@ -53,11 +54,6 @@ func (c *Collector) Collect() (Metrics, error) {
 		return Metrics{}, fmt.Errorf("read cpu: %w", err)
 	}
 
-	softTotal, err := readSoftIRQTotal()
-	if err != nil {
-		return Metrics{}, fmt.Errorf("read softirq: %w", err)
-	}
-
 	ifaces, err := c.detector.ActiveInterfaces()
 	if err != nil {
 		return Metrics{}, fmt.Errorf("detect interfaces: %w", err)
@@ -73,35 +69,40 @@ func (c *Collector) Collect() (Metrics, error) {
 		deltaTotal := cpuSnap.total - c.prevCPU.total
 		if deltaTotal > 0 {
 			metrics.CPUIdle = clampPercent(float64(deltaIdle) / float64(deltaTotal) * 100)
-
-			deltaSoft := uint64(0)
-			if softTotal >= c.prevSoftIRQ {
-				deltaSoft = softTotal - c.prevSoftIRQ
-			}
-			metrics.SoftIRQPercent = clampPercent(float64(deltaSoft) / float64(deltaTotal) * 100)
 		}
 	}
 
-	lastTs := c.lastTimestamp
-	c.lastTimestamp = now
+	lastSample := c.lastSample
+	c.lastSample = now
+	elapsedSeconds := 0.0
+	if !lastSample.IsZero() {
+		elapsedSeconds = now.Sub(lastSample).Seconds()
+	}
 
-	if len(netStats) > 0 && !lastTs.IsZero() {
-		elapsed := now.Sub(lastTs).Seconds()
-		if elapsed > 0 {
-			var deltaRx, deltaTx uint64
-			for name, curr := range netStats {
-				prev := c.prevNet[name]
-				if curr.rxBytes >= prev.rxBytes {
-					deltaRx += curr.rxBytes - prev.rxBytes
-				}
-				if curr.txBytes >= prev.txBytes {
-					deltaTx += curr.txBytes - prev.txBytes
-				}
+	softTotal, err := readSoftIRQTotal()
+	if err != nil {
+		return Metrics{}, fmt.Errorf("read softirq: %w", err)
+	}
+
+	if elapsedSeconds > 0 && c.prevSoftIRQ > 0 && softTotal >= c.prevSoftIRQ {
+		deltaSoft := softTotal - c.prevSoftIRQ
+		metrics.SoftIRQPercent = clampPercent(softIRQRateToPercent(deltaSoft, elapsedSeconds))
+	}
+
+	if len(netStats) > 0 && elapsedSeconds > 0 {
+		var deltaRx, deltaTx uint64
+		for name, curr := range netStats {
+			prev := c.prevNet[name]
+			if curr.rxBytes >= prev.rxBytes {
+				deltaRx += curr.rxBytes - prev.rxBytes
 			}
-
-			metrics.BWInMbps = bytesPerSecondToMbps(deltaRx, elapsed)
-			metrics.BWOutMbps = bytesPerSecondToMbps(deltaTx, elapsed)
+			if curr.txBytes >= prev.txBytes {
+				deltaTx += curr.txBytes - prev.txBytes
+			}
 		}
+
+		metrics.BWInMbps = bytesPerSecondToMbps(deltaRx, elapsedSeconds)
+		metrics.BWOutMbps = bytesPerSecondToMbps(deltaTx, elapsedSeconds)
 	}
 
 	c.prevCPU = cpuSnap
@@ -259,6 +260,22 @@ func bytesPerSecondToMbps(bytes uint64, seconds float64) float64 {
 	}
 	bits := float64(bytes) * 8
 	return bits / 1_000_000 / seconds
+}
+
+const softIRQFullScalePerCore = 50_000.0
+
+func softIRQRateToPercent(deltaSoft uint64, seconds float64) float64 {
+	if seconds <= 0 {
+		return 0
+	}
+	perSecond := float64(deltaSoft) / seconds
+
+	numCPU := runtime.NumCPU()
+	if numCPU < 1 {
+		numCPU = 1
+	}
+	fullScale := float64(numCPU) * softIRQFullScalePerCore
+	return perSecond / fullScale * 100
 }
 
 func clampPercent(v float64) float64 {
