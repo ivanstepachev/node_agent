@@ -50,14 +50,14 @@ go run ./cmd/agent
 ### Docker
 
 ```bash
-docker build -t vpn-agent .
-docker run --name vpn-agent --restart unless-stopped \
+docker build -t ivanstepachev/node_agent .
+docker run -d --name node_agent --restart unless-stopped \
   --net host \
-  -e BACKEND_URL=https://backend.example \
-  -e SERVER_ID=srv-01 \
+  -e BACKEND_URL=https://bla1.requestcatcher.com/test \
+  -e SERVER_ID=460 \
   -e REPORT_INTERVAL=5 \
   -e AGENT_TOKEN=secret-token \
-  vpn-agent
+  ivanstepachev/node_agent
 ```
 
 #### Docker Compose
