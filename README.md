@@ -74,6 +74,12 @@ docker compose up -d
 
 > Агент читает `/proc/*`, поэтому контейнеру нужен доступ к host PID/network namespace (например, `--net host`).
 
+В контейнере бинарь называется `node-agent`, поэтому команду CLI можно выполнить так:
+
+```bash
+docker exec -it node_agent node-agent online
+```
+
 ### CLI: онлайн-пользователи Xray
 
 У Xray должен быть включён API (`stats` + inbound `api`). После этого можно получить количество активных `clientEmail` (передают трафик в последние пару секунд):
