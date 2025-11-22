@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -11,9 +14,21 @@ import (
 	"vpnagent/internal/logger"
 	"vpnagent/internal/netinfo"
 	"vpnagent/internal/sender"
+	"vpnagent/internal/xraystats"
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		if err := runCLI(os.Args[1:]); err != nil {
+			logger.Fatalf("cli: %v", err)
+		}
+		return
+	}
+
+	runAgent()
+}
+
+func runAgent() {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Fatalf("config: %v", err)
@@ -52,4 +67,41 @@ func main() {
 			cancel()
 		}
 	}
+}
+
+func runCLI(args []string) error {
+	if len(args) == 0 {
+		printUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "online":
+		addr := strings.TrimSpace(os.Getenv("XRAY_API_ADDR"))
+		client := xraystats.NewClient(addr)
+
+		ctx, cancel := context.WithTimeout(context.Background(), xraystats.DefaultSampleInterval*2+3*time.Second)
+		defer cancel()
+
+		count, err := client.CountActiveUsers(ctx)
+		if err != nil {
+			return fmt.Errorf("fetch active users: %w", err)
+		}
+
+		fmt.Printf("Active users: %d\n", count)
+		return nil
+	case "help", "--help", "-h":
+		printUsage()
+		return nil
+	default:
+		printUsage()
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  node-agent            # run metrics agent (default)")
+	fmt.Println("  node-agent online     # show number of active Xray users via XRAY_API_ADDR")
+	fmt.Println("  node-agent help       # show this message")
 }

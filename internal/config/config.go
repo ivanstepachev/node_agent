@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	defaultInterval = 5 * time.Second
-	minInterval     = 3 * time.Second
-	maxInterval     = 30 * time.Second
+	defaultInterval    = 5 * time.Second
+	minInterval        = 3 * time.Second
+	maxInterval        = 30 * time.Second
+	defaultXrayAPIAddr = "127.0.0.1:10085"
 )
 
 // Config stores runtime settings loaded from environment variables.
@@ -21,6 +22,7 @@ type Config struct {
 	ServerID       string
 	ReportInterval time.Duration
 	AgentToken     string
+	XrayAPIAddr    string
 }
 
 // Load reads and validates environment variables, applying defaults when possible.
@@ -29,6 +31,13 @@ func Load() (Config, error) {
 		BackendURL: strings.TrimSpace(os.Getenv("BACKEND_URL")),
 		ServerID:   strings.TrimSpace(os.Getenv("SERVER_ID")),
 		AgentToken: strings.TrimSpace(os.Getenv("AGENT_TOKEN")),
+		XrayAPIAddr: func() string {
+			addr := strings.TrimSpace(os.Getenv("XRAY_API_ADDR"))
+			if addr == "" {
+				return defaultXrayAPIAddr
+			}
+			return addr
+		}(),
 	}
 
 	if cfg.BackendURL == "" {
